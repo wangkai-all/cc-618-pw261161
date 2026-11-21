@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>植株订单售后归因演示</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --series-1: #2a78d6; /* 替补使用率 */
+    --series-2: #eb6834; /* 投诉率 */
+    --gridline: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --gridline: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 8px 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; }
+  p.sub { color: var(--text-secondary); margin: 0 0 16px; font-size: 14px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0; }
+  button {
+    font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+    cursor: pointer;
+  }
+  button.primary { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  button:hover { filter: brightness(0.96); }
+  select {
+    font: inherit; font-size: 14px; padding: 7px 8px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+  }
+  label { font-size: 13px; color: var(--text-secondary); }
+  section#evidence {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; margin-top: 12px; min-height: 120px;
+  }
+  .kpis { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 16px; }
+  .kpi {
+    flex: 1 1 150px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px;
+    background: var(--surface-1);
+  }
+  .kpi .label { font-size: 12px; color: var(--text-secondary); }
+  .kpi .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0 4px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gridline); }
+  th { color: var(--text-secondary); font-weight: 500; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .note { font-size: 13px; color: var(--text-secondary); margin: 10px 0 0; }
+  .ok { color: var(--text-primary); }
+  .err { color: #d03b3b; font-weight: 500; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--text-secondary); margin: 4px 0 8px; }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+  pre.raw {
+    background: var(--page); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 12px; overflow: auto; max-height: 260px; margin: 12px 0 0;
+  }
+  .boundary { font-size: 13px; color: var(--text-secondary); }
+  .boundary li { margin: 2px 0; }
+  svg text { font-family: inherit; }
+</style>
+</head>
+<body class="viz-root">
+<main>
+  <h1>植株订单售后归因演示</h1>
+  <p class="sub">
+    订单行同时保留替换前后的植株品类；投诉工单可先挂父订单、再归因到某一件。
+    指标端分开统计替补使用率与投诉率：仅「已认领且定位到订单行」的投诉计入投诉率，不确定个案单列边界。
+  </p>
+
+  <div class="toolbar">
+    <button id="btn-compute" class="primary">计算原替换和投诉</button>
+    <label for="sel-ticket">投诉单</label>
+    <select id="sel-ticket"></select>
+    <label for="sel-line">改挂到</label>
+    <select id="sel-line"></select>
+    <button id="btn-reassign">重分配一张投诉单</button>
+    <button id="btn-attribution">查看品类归因</button>
+    <button id="btn-reset">重置数据</button>
+  </div>
+
+  <section id="evidence" data-evidence-result="idle" aria-live="polite">
+    <p class="note">尚未执行操作。点击上方按钮，此处会展示计算结果与处理前后变化。</p>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+const evidence = document.getElementById('evidence');
+const selTicket = document.getElementById('sel-ticket');
+const selLine = document.getElementById('sel-line');
+let bootState = null;
+
+const pct = (x) => (x * 100).toFixed(1).replace(/\.0$/, '') + '%';
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const data = await res.json();
+  if (!res.ok) {
+    const err = new Error(data.message || res.statusText);
+    err.payload = data;
+    throw err;
+  }
+  return data;
+}
+
+function setEvidence(kind, html, raw) {
+  evidence.dataset.evidenceResult = kind;
+  evidence.innerHTML = html + (raw ? '<pre class="raw">' + esc(JSON.stringify(raw, null, 2)) + '</pre>' : '');
+}
+
+function showError(err) {
+  setEvidence('error', '<p class="err">操作失败：' + esc(err.message) + '</p>', err.payload || null);
+}
+
+// ---- 指标渲染：KPI + 分组柱状图 + 品类表 + 边界清单 ----
+
+function renderMetrics(metrics, heading) {
+  const t = metrics.totals;
+  const kpis = [
+    ['订单行总数', t.lines],
+    ['替补行 / 替补使用率', t.substitutedLines + ' / ' + pct(t.substitutionRate)],
+    ['计入投诉 / 投诉率', t.countedComplaints + ' / ' + pct(t.complaintRate)],
+    ['边界个案（不计入）', t.boundaryCases],
+  ];
+  let html = '<h2>' + esc(heading) + '</h2>';
+  html += '<div class="kpis">' + kpis.map(([l, v]) =>
+    '<div class="kpi"><div class="label">' + esc(l) + '</div><div class="value">' + esc(v) + '</div></div>').join('') + '</div>';
+
+  html += renderChart(metrics.categories);
+
+  html += '<table><thead><tr><th>品类</th><th class="num">替换前行数</th><th class="num">替换后行数</th>' +
+    '<th class="num">被替补出</th><th class="num">替补进来</th><th class="num">替补使用率</th>' +
+    '<th class="num">计入投诉</th><th class="num">投诉率</th></tr></thead><tbody>';
+  for (const c of metrics.categories) {
+    html += '<tr><td>' + esc(c.category) + '</td>' +
+      '<td class="num">' + c.originalLines + '</td>' +
+      '<td class="num">' + c.finalLines + '</td>' +
+      '<td class="num">' + c.substitutedOut + '</td>' +
+      '<td class="num">' + c.substitutedIn + '</td>' +
+      '<td class="num">' + pct(c.substitutionRate) + '</td>' +
+      '<td class="num">' + c.complaints + (c.complaintTickets.length ? '（' + esc(c.complaintTickets.join('、')) + '）' : '') + '</td>' +
+      '<td class="num">' + pct(c.complaintRate) + '</td></tr>';
+  }
+  html += '</tbody></table>';
+
+  if (metrics.boundary.length) {
+    html += '<h2>边界个案（单列，不计入投诉率）</h2><ul class="boundary">';
+    for (const b of metrics.boundary) {
+      html += '<li>' + esc(b.ticketId) + '（父订单 ' + esc(b.orderId) + '）：' + esc(b.reason) + '</li>';
+    }
+    html += '</ul>';
+  }
+  html += '<p class="note">口径：' + esc(metrics.policy) + '</p>';
+  return html;
+}
+
+// 分组柱状图：每个品类两根柱子（替补使用率 / 投诉率），0–100% 固定刻度
+function renderChart(categories) {
+  const W = 660, H = 250, padL = 44, padR = 8, padT = 14, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const yBase = padT + plotH;
+  const barW = 20, gap = 2;
+  const groupW = plotW / categories.length;
+
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="各品类替补使用率与投诉率对比">';
+  for (let i = 0; i <= 4; i++) {
+    const v = i * 0.25, y = yBase - v * plotH;
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y +
+      '" stroke="var(--gridline)" stroke-width="1"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y + 4) + '" text-anchor="end" font-size="11" fill="var(--text-muted)">' +
+      (v * 100) + '%</text>';
+  }
+  svg += '<line x1="' + padL + '" y1="' + yBase + '" x2="' + (W - padR) + '" y2="' + yBase +
+    '" stroke="var(--baseline)" stroke-width="1"/>';
+
+  categories.forEach((c, i) => {
+    const cx = padL + groupW * i + groupW / 2;
+    const bars = [
+      { v: c.substitutionRate, fill: 'var(--series-1)', name: '替补使用率' },
+      { v: c.complaintRate, fill: 'var(--series-2)', name: '投诉率' },
+    ];
+    const pairW = barW * 2 + gap;
+    bars.forEach((b, j) => {
+      if (b.v <= 0) return;
+      const h = Math.max(b.v * plotH, 2);
+      const x = cx - pairW / 2 + j * (barW + gap);
+      const y = yBase - h;
+      const r = Math.min(4, h / 2);
+      const d = 'M ' + x + ' ' + yBase + ' L ' + x + ' ' + (y + r) +
+        ' Q ' + x + ' ' + y + ' ' + (x + r) + ' ' + y +
+        ' L ' + (x + barW - r) + ' ' + y +
+        ' Q ' + (x + barW) + ' ' + y + ' ' + (x + barW) + ' ' + (y + r) +
+        ' L ' + (x + barW) + ' ' + yBase + ' Z';
+      svg += '<path d="' + d + '" fill="' + b.fill + '">' +
+        '<title>' + esc(c.category + ' ' + b.name + '：' + pct(b.v)) + '</title></path>';
+      svg += '<text x="' + (x + barW / 2) + '" y="' + (y - 4) + '" text-anchor="middle" font-size="10" fill="var(--text-secondary)">' +
+        pct(b.v) + '</text>';
+    });
+    svg += '<text x="' + cx + '" y="' + (yBase + 18) + '" text-anchor="middle" font-size="12" fill="var(--text-primary)">' +
+      esc(c.category) + '</text>';
+  });
+  svg += '</svg>';
+
+  return '<div class="legend">' +
+    '<span><span class="swatch" style="background:var(--series-1)"></span>替补使用率</span>' +
+    '<span><span class="swatch" style="background:var(--series-2)"></span>投诉率</span></div>' + svg;
+}
+
+// ---- 重分配结果渲染：处理前后对比 ----
+
+function renderReassign(r) {
+  let html = '<h2>重分配结果</h2>';
+  html += '<p class="ok">' + esc(r.explanation) + '</p>';
+  html += '<table><thead><tr><th>项目</th><th class="num">处理前</th><th class="num">处理后</th></tr></thead><tbody>';
+  for (const c of r.changes) {
+    html += '<tr><td>品类「' + esc(c.category) + '」计入投诉</td><td class="num">' + c.before + '</td><td class="num">' + c.after + '</td></tr>';
+  }
+  html += '<tr><td>边界个案数</td><td class="num">' + r.totals.boundaryBefore + '</td><td class="num">' + r.totals.boundaryAfter + '</td></tr>';
+  html += '<tr><td>已认领投诉总数（应不变，证明未重复计算）</td><td class="num">' + r.totals.claimedBefore + '</td><td class="num">' + r.totals.claimedAfter + '</td></tr>';
+  html += '<tr><td>计入投诉率总数</td><td class="num">' + r.totals.countedBefore + '</td><td class="num">' + r.totals.countedAfter + '</td></tr>';
+  html += '</tbody></table>';
+  html += renderMetrics(r.metrics, '处理后指标');
+  return html;
+}
+
+// ---- 品类归因视图 ----
+
+function renderAttribution(view) {
+  let html = '<h2>品类归因（阈值 ' + view.threshold + '）</h2>';
+  for (const t of view.tickets) {
+    html += '<h2 style="font-size:14px;margin:14px 0 4px">' + esc(t.ticketId) +
+      '（' + (t.status === 'claimed' ? '已认领' : '未认领') + '，父订单 ' + esc(t.orderId) + '）</h2>';
+    html += '<p class="note" style="margin:0 0 6px">「' + esc(t.text) + '」— ' +
+      (t.countedIn ? '计入品类「' + esc(t.countedIn) + '」投诉' : '不计入：' + esc(t.boundaryReason)) + '</p>';
+    html += '<table><thead><tr><th>候选订单行</th><th>替换前→替换后</th><th class="num">可信度</th><th>依据</th></tr></thead><tbody>';
+    for (const c of t.candidates) {
+      const mark = t.currentLineId === c.lineId ? ' ← 当前归属' : '';
+      html += '<tr><td>' + esc(c.lineId) + esc(mark) + '</td>' +
+        '<td>' + esc(c.originalCategory) + ' → ' + esc(c.finalCategory) + (c.substituted ? '（替补）' : '') + '</td>' +
+        '<td class="num">' + c.confidence.toFixed(2) + '</td>' +
+        '<td>' + esc(c.reasons.join('；')) + '</td></tr>';
+    }
+    html += '</tbody></table>';
+  }
+  html += '<p class="note">口径：' + esc(view.policy) + '</p>';
+  return html;
+}
+
+// ---- 初始化与事件 ----
+
+async function refreshState() {
+  bootState = await api('/api/state');
+  const complaints = bootState.tickets.filter((t) => t.type === 'complaint');
+  selTicket.innerHTML = complaints.map((t) =>
+    '<option value="' + esc(t.id) + '">' + esc(t.id) + '（' + (t.status === 'claimed' ? '已认领' : '未认领') +
+    (t.lineId ? '，已挂 ' + esc(t.lineId) : '，挂父订单') + '）</option>').join('');
+  refreshLines();
+}
+
+function refreshLines() {
+  const ticket = bootState.tickets.find((t) => t.id === selTicket.value);
+  const order = bootState.orders.find((o) => o.id === (ticket && ticket.orderId));
+  const opts = ['<option value="">自动归因（按可信度）</option>'];
+  if (order) {
+    for (const l of order.lines) {
+      opts.push('<option value="' + esc(l.id) + '">' + esc(l.id) + '（' + esc(l.originalCategory) +
+        '→' + esc(l.finalCategory) + (l.originalCategory !== l.finalCategory ? '，替补' : '') + '）</option>');
+    }
+  }
+  selLine.innerHTML = opts.join('');
+}
+
+document.getElementById('btn-compute').addEventListener('click', async () => {
+  try {
+    const metrics = await api('/api/compute', { method: 'POST' });
+    setEvidence('compute', renderMetrics(metrics, '原替换和投诉计算结果'), metrics);
+  } catch (err) { showError(err); }
+});
+
+document.getElementById('btn-reassign').addEventListener('click', async () => {
+  try {
+    const body = { ticketId: selTicket.value };
+    if (selLine.value) body.lineId = selLine.value;
+    const result = await api('/api/reassign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    setEvidence('reassign', renderReassign(result), result);
+    await refreshState();
+  } catch (err) { showError(err); }
+});
+
+document.getElementById('btn-attribution').addEventListener('click', async () => {
+  try {
+    const view = await api('/api/attribution');
+    setEvidence('attribution', renderAttribution(view), view);
+  } catch (err) { showError(err); }
+});
+
+document.getElementById('btn-reset').addEventListener('click', async () => {
+  try {
+    await api('/api/reset', { method: 'POST' });
+    await refreshState();
+    setEvidence('reset', '<p class="ok">数据已重置为初始虚构数据。</p>');
+  } catch (err) { showError(err); }
+});
+
+selTicket.addEventListener('change', refreshLines);
+refreshState().catch(showError);
+</script>
+</body>
+</html>
